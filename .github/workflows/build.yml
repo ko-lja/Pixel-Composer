@@ -19,11 +19,12 @@ jobs:
 
       - name: Setup GameMaker / Igor
         id: igor
-        uses: bscotch/igor-setup@v1
+        uses: bscotch/igor-setup@v1.4.2
         with:
           access-key: ${{ secrets.ACCESS_KEY }}
           runtime-version: 2024.11.0.227
           modules: windows
+          cache: true
 
       - name: Build Pixel Composer
         id: build
