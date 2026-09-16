@@ -97,13 +97,76 @@ jobs:
           yyp-path: ${{ github.workspace }}/PixelComposer.yyp
           platform: windows
           config: Default
-          yyc: true
+          yyc: false
           name: PixelComposer.zip
           save-logs: true
 
-      - name: Upload Windows build
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install innosetup -y --no-progress
+
+          $packageDir = Join-Path $env:RUNNER_TEMP 'pixelcomposer-package'
+          $installerDir = Join-Path $env:GITHUB_WORKSPACE 'installer'
+          New-Item -ItemType Directory -Force -Path $packageDir, $installerDir | Out-Null
+          Expand-Archive -Force "$env:GITHUB_WORKSPACE\out\PixelComposer.zip" $packageDir
+
+          $exe = Get-ChildItem -Path $packageDir -Recurse -Filter 'PixelComposer.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'PixelComposer.exe was not found in the GameMaker package.' }
+          $appRoot = $exe.Directory.FullName
+
+          $issPath = Join-Path $env:RUNNER_TEMP 'PixelComposer.iss'
+          @"
+          [Setup]
+          AppId={{E835F723-4E41-47BE-9E63-0E0EF648CB58}
+          AppName=Pixel Composer
+          AppVersion=1.21.10.001
+          AppPublisher=MakhamDev
+          DefaultDirName={localappdata}\Programs\Pixel Composer
+          DefaultGroupName=Pixel Composer
+          UninstallDisplayIcon={app}\PixelComposer.exe
+          OutputDir=$installerDir
+          OutputBaseFilename=PixelComposer-Setup
+          Compression=lzma2
+          SolidCompression=yes
+          WizardStyle=modern
+          PrivilegesRequired=lowest
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+
+          [Tasks]
+          Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
+
+          [Files]
+          Source: "$appRoot\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+          [Icons]
+          Name: "{group}\Pixel Composer"; Filename: "{app}\PixelComposer.exe"
+          Name: "{autodesktop}\Pixel Composer"; Filename: "{app}\PixelComposer.exe"; Tasks: desktopicon
+
+          [Run]
+          Filename: "{app}\PixelComposer.exe"; Description: "Launch Pixel Composer"; Flags: nowait postinstall skipifsilent
+          "@ | Set-Content -Encoding utf8 $issPath
+
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler was not found at $iscc" }
+          & $iscc $issPath
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+
+          $installer = Join-Path $installerDir 'PixelComposer-Setup.exe'
+          if (-not (Test-Path $installer)) { throw 'PixelComposer-Setup.exe was not produced.' }
+
+      - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: PixelComposer-Windows
-          path: ${{ steps.build.outputs.out-dir }}
+          name: PixelComposer-Windows-Installer
+          path: installer/PixelComposer-Setup.exe
+          if-no-files-found: error
+
+      - name: Upload Windows portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: PixelComposer-Windows-Portable
+          path: out/PixelComposer.zip
           if-no-files-found: error
