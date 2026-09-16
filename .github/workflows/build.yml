@@ -1,0 +1,46 @@
+name: Build Pixel Composer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup GameMaker / Igor
+        id: igor
+        uses: bscotch/igor-setup@v2
+        with:
+          access-key: ${{ secrets.ACCESS_KEY }}
+          runtime-version: 2024.11.0.227
+          modules: windows
+          cache: true
+
+      - name: Build Pixel Composer
+        id: build
+        uses: bscotch/igor-build@v1
+        with:
+          user-dir: ${{ steps.igor.outputs.user-dir }}
+          yyp-path: PixelComposer.yyp
+          platform: windows
+          config: Default
+          yyc: true
+          name: PixelComposer.zip
+          save-logs: true
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: PixelComposer-Windows
+          path: ${{ steps.build.outputs.out-dir }}
+          if-no-files-found: error
