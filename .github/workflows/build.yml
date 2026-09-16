@@ -25,6 +25,65 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\prefabs" | Out-Null
           Copy-Item -Recurse -Force "$env:RUNNER_TEMP\chaptermaster\prefabs\io.gamemaker.sdfshaders-1.0.0" "$env:GITHUB_WORKSPACE\prefabs\io.gamemaker.sdfshaders-1.0.0"
 
+      - name: Build Apollo extension from source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          choco install haxe --version=4.3.4 -y --no-progress
+          Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
+          Update-SessionEnvironment
+
+          $tools = Join-Path $env:RUNNER_TEMP 'apollo-tools'
+          $apollo = Join-Path $tools 'Apollo'
+          $gmlcpp = Join-Path $tools 'GmlCppExtFuncs'
+          $gmxgen = Join-Path $tools 'GmxGen'
+
+          git clone --depth 1 https://github.com/YAL-GameMaker/Apollo.git $apollo
+          git clone --depth 1 https://github.com/YAL-GameMaker-Tools/GmlCppExtFuncs.git $gmlcpp
+          git clone --depth 1 https://github.com/YAL-GameMaker-Tools/GmxGen.git $gmxgen
+
+          Push-Location $gmlcpp
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          haxe -cp src -neko bin/GmlCppExtFuncs.n -main CppGen
+          nekotools boot bin/GmlCppExtFuncs.n
+          Pop-Location
+
+          Push-Location $gmxgen
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          haxe -cp src -main GenMain -neko bin/GmxGen.n
+          nekotools boot bin/GmxGen.n
+          Pop-Location
+
+          $env:PATH = "$gmlcpp\bin;$gmxgen\bin;$env:PATH"
+
+          $luaArchive = Join-Path $tools 'lua-5.4.4.tar.gz'
+          Invoke-WebRequest 'https://www.lua.org/ftp/lua-5.4.4.tar.gz' -OutFile $luaArchive
+          tar -xzf $luaArchive -C $tools
+          New-Item -ItemType Directory -Force -Path "$apollo\Lua" | Out-Null
+          Copy-Item -Force "$tools\lua-5.4.4\src\*" "$apollo\Lua\"
+
+          $project = Join-Path $apollo 'Apollo\Apollo.vcxproj'
+          (Get-Content -Raw $project).Replace('<PlatformToolset>v143</PlatformToolset>', '<PlatformToolset>v145</PlatformToolset>') | Set-Content -Encoding utf8 $project
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if (-not $vsPath) { throw 'Visual Studio/MSBuild installation was not found.' }
+          $msbuild = Join-Path $vsPath 'MSBuild\Current\Bin\MSBuild.exe'
+
+          & $msbuild "$apollo\Apollo.sln" /m /p:Configuration=Release /p:Platform=Win32
+          if ($LASTEXITCODE -ne 0) { throw "Apollo Win32 build failed with exit code $LASTEXITCODE" }
+          & $msbuild "$apollo\Apollo.sln" /m /p:Configuration=Release /p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { throw "Apollo x64 build failed with exit code $LASTEXITCODE" }
+
+          $apollo32 = Join-Path $apollo 'Release\Apollo.dll'
+          $apollo64 = Join-Path $apollo 'x64\Release\Apollo.dll'
+          if (-not (Test-Path $apollo32)) { throw "Apollo Win32 DLL not found at $apollo32" }
+          if (-not (Test-Path $apollo64)) { throw "Apollo x64 DLL not found at $apollo64" }
+
+          Copy-Item -Force $apollo32 "$env:GITHUB_WORKSPACE\extensions\Apollo\Apollo.dll"
+          Copy-Item -Force $apollo64 "$env:GITHUB_WORKSPACE\extensions\Apollo\Apollo_x64.dll"
+
       - name: Setup GameMaker / Igor
         id: igor
         uses: bscotch/igor-setup@v1.4.2
