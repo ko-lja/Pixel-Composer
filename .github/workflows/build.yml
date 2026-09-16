@@ -28,10 +28,10 @@ jobs:
 
       - name: Build Pixel Composer
         id: build
-        uses: bscotch/igor-build@v1
+        uses: bscotch/igor-build@v1.3.3
         with:
           user-dir: ${{ steps.igor.outputs.user-dir }}
-          yyp-path: PixelComposer.yyp
+          yyp-path: ${{ github.workspace }}/PixelComposer.yyp
           platform: windows
           config: Default
           yyc: true
