@@ -17,6 +17,14 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Provide GameMaker SDF prefab
+        shell: pwsh
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/Adeptus-Dominus/ChapterMaster.git "$env:RUNNER_TEMP\chaptermaster"
+          git -C "$env:RUNNER_TEMP\chaptermaster" sparse-checkout set prefabs/io.gamemaker.sdfshaders-1.0.0
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\prefabs" | Out-Null
+          Copy-Item -Recurse -Force "$env:RUNNER_TEMP\chaptermaster\prefabs\io.gamemaker.sdfshaders-1.0.0" "$env:GITHUB_WORKSPACE\prefabs\io.gamemaker.sdfshaders-1.0.0"
+
       - name: Setup GameMaker / Igor
         id: igor
         uses: bscotch/igor-setup@v1.4.2
