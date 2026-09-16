@@ -71,17 +71,13 @@ jobs:
           if (-not $vsPath) { throw 'Visual Studio/MSBuild installation was not found.' }
           $msbuild = Join-Path $vsPath 'MSBuild\Current\Bin\MSBuild.exe'
 
-          & $msbuild "$apollo\Apollo.sln" /m /p:Configuration=Release /p:Platform=Win32
-          if ($LASTEXITCODE -ne 0) { throw "Apollo Win32 build failed with exit code $LASTEXITCODE" }
           & $msbuild "$apollo\Apollo.sln" /m /p:Configuration=Release /p:Platform=x64
           if ($LASTEXITCODE -ne 0) { throw "Apollo x64 build failed with exit code $LASTEXITCODE" }
 
-          $apollo32 = Join-Path $apollo 'Release\Apollo.dll'
           $apollo64 = Join-Path $apollo 'x64\Release\Apollo.dll'
-          if (-not (Test-Path $apollo32)) { throw "Apollo Win32 DLL not found at $apollo32" }
           if (-not (Test-Path $apollo64)) { throw "Apollo x64 DLL not found at $apollo64" }
 
-          Copy-Item -Force $apollo32 "$env:GITHUB_WORKSPACE\extensions\Apollo\Apollo.dll"
+          Copy-Item -Force $apollo64 "$env:GITHUB_WORKSPACE\extensions\Apollo\Apollo.dll"
           Copy-Item -Force $apollo64 "$env:GITHUB_WORKSPACE\extensions\Apollo\Apollo_x64.dll"
 
       - name: Setup GameMaker / Igor
