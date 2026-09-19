@@ -83,6 +83,40 @@ jobs:
           "APOLLO_X64_SHA256=$apolloHash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Using legacy Apollo x64 SHA256: $apolloHash"
 
+      - name: Provide local-only extension key stubs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # These two files are deliberately excluded by extensions/.gitignore
+          # because upstream keeps deployment credentials in them. The public
+          # project still registers their init hooks, though, so a clean clone
+          # otherwise builds an executable that fails immediately at startup.
+          #
+          # For public/CI builds, provide non-secret fallbacks. Patreon-backed
+          # online verification is unavailable without the owner's real keys,
+          # but the editor itself can start and run.
+          $patreonFile = Join-Path $env:GITHUB_WORKSPACE 'extensions\patreon_key\patreon_key.gml'
+          @'
+          function patreon_init_keys() {
+              global.PATREON_ACTIVATION_KEYS = "";
+              global.PATREON_EMAIL_TOKENS = "";
+          }
+          '@ | Set-Content -Encoding utf8 $patreonFile
+
+          $privateKeysFile = Join-Path $env:GITHUB_WORKSPACE 'extensions\PRIVATE_KEYS\PRIVATE_KEYS.gml'
+          @'
+          function __init_private_keys() {
+              // Intentionally empty for public builds.
+          }
+          '@ | Set-Content -Encoding utf8 $privateKeysFile
+
+          foreach ($file in @($patreonFile, $privateKeysFile)) {
+            if (-not (Test-Path $file)) {
+              throw "Required public-build extension stub was not created: $file"
+            }
+          }
+
       - name: Setup GameMaker / Igor
         id: igor
         uses: bscotch/igor-setup@v1.4.2
@@ -152,9 +186,9 @@ jobs:
           $output = ''
           if (Test-Path $stdout) { $output += Get-Content -Raw $stdout }
           if (Test-Path $stderr) { $output += "`n" + (Get-Content -Raw $stderr) }
-          if ($output -match 'Unable to find function') {
+          if ($output -match 'Unable to find function|Could not locate initialization function') {
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-            throw "Pixel Composer reported a missing function during startup:`n$output"
+            throw "Pixel Composer reported a missing extension function during startup:`n$output"
           }
 
           if ($process.HasExited) {
