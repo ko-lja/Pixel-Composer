@@ -25,60 +25,63 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\prefabs" | Out-Null
           Copy-Item -Recurse -Force "$env:RUNNER_TEMP\chaptermaster\prefabs\io.gamemaker.sdfshaders-1.0.0" "$env:GITHUB_WORKSPACE\prefabs\io.gamemaker.sdfshaders-1.0.0"
 
-      - name: Build Apollo extension from source
+      - name: Restore compatible Apollo extension
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          choco install haxe --version=4.3.4 -y --no-progress
-          Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
-          Update-SessionEnvironment
+          # Pixel Composer's Apollo.yy still describes the legacy Apollo API and
+          # GML helper files. Building current YAL-GameMaker/Apollo produces a
+          # different API and leaves the helper .gml files missing, which makes
+          # the packaged app fail at runtime (for example: lua_call not found).
+          # Restore the exact extension payload that Pixel Composer historically
+          # shipped alongside this API, while keeping the current Apollo.yy.
+          $apolloCommit = 'f02c1fd2179e134b543aeff25053de486b2e0485'
+          $legacy = Join-Path $env:RUNNER_TEMP 'pixel-composer-legacy'
+          $legacyApollo = Join-Path $legacy 'extensions\Apollo'
+          $currentApollo = Join-Path $env:GITHUB_WORKSPACE 'extensions\Apollo'
+          $currentYy = Join-Path $currentApollo 'Apollo.yy'
+          $savedYy = Join-Path $env:RUNNER_TEMP 'Apollo.yy'
 
-          $tools = Join-Path $env:RUNNER_TEMP 'apollo-tools'
-          $apollo = Join-Path $tools 'Apollo'
-          $gmlcpp = Join-Path $tools 'GmlCppExtFuncs'
-          $gmxgen = Join-Path $tools 'GmxGen'
+          Copy-Item -Force $currentYy $savedYy
 
-          git clone --depth 1 https://github.com/YAL-GameMaker/Apollo.git $apollo
-          git clone --depth 1 https://github.com/YAL-GameMaker-Tools/GmlCppExtFuncs.git $gmlcpp
-          git clone --depth 1 https://github.com/YAL-GameMaker-Tools/GmxGen.git $gmxgen
+          git init $legacy
+          git -C $legacy remote add origin https://github.com/Ttanasart-pt/Pixel-Composer.git
+          git -C $legacy fetch --depth 1 origin $apolloCommit
+          git -C $legacy checkout FETCH_HEAD -- extensions/Apollo
 
-          Push-Location $gmlcpp
-          New-Item -ItemType Directory -Force -Path bin | Out-Null
-          haxe -cp src -neko bin/GmlCppExtFuncs.n -main CppGen
-          nekotools boot bin/GmlCppExtFuncs.n
-          Pop-Location
+          if (-not (Test-Path $legacyApollo)) {
+            throw "Legacy Apollo payload was not found at commit $apolloCommit."
+          }
 
-          Push-Location $gmxgen
-          New-Item -ItemType Directory -Force -Path bin | Out-Null
-          haxe -cp src -main GenMain -neko bin/GmxGen.n
-          nekotools boot bin/GmxGen.n
-          Pop-Location
+          Copy-Item -Recurse -Force "$legacyApollo\*" $currentApollo
+          Copy-Item -Force $savedYy $currentYy
 
-          $env:PATH = "$gmlcpp\bin;$gmxgen\bin;$env:PATH"
+          # Apollo.yy is GameMaker JSON with trailing commas, so use its filename
+          # declarations instead of trying to parse it as strict JSON.
+          $yyText = Get-Content -Raw $currentYy
+          $declaredFiles = [regex]::Matches($yyText, '"filename"\s*:\s*"([^"]+)"') |
+            ForEach-Object { $_.Groups[1].Value } |
+            Where-Object { $_ } |
+            Sort-Object -Unique
 
-          $luaArchive = Join-Path $tools 'lua-5.4.4.tar.gz'
-          Invoke-WebRequest 'https://www.lua.org/ftp/lua-5.4.4.tar.gz' -OutFile $luaArchive
-          tar -xzf $luaArchive -C $tools
-          New-Item -ItemType Directory -Force -Path "$apollo\Lua" | Out-Null
-          Copy-Item -Force "$tools\lua-5.4.4\src\*" "$apollo\Lua\"
+          foreach ($file in $declaredFiles) {
+            $path = Join-Path $currentApollo $file
+            if (-not (Test-Path $path)) {
+              throw "Apollo.yy references missing extension file: $file"
+            }
+          }
 
-          $project = Join-Path $apollo 'Apollo\Apollo.vcxproj'
-          (Get-Content -Raw $project).Replace('<PlatformToolset>v143</PlatformToolset>', '<PlatformToolset>v145</PlatformToolset>') | Set-Content -Encoding utf8 $project
+          foreach ($file in @('Apollo.dll', 'Apollo_x64.dll', 'apollo_call.gml', 'apollo_core.gml')) {
+            $path = Join-Path $currentApollo $file
+            if (-not (Test-Path $path)) {
+              throw "Required Apollo compatibility file is missing: $file"
+            }
+          }
 
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsPath = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
-          if (-not $vsPath) { throw 'Visual Studio/MSBuild installation was not found.' }
-          $msbuild = Join-Path $vsPath 'MSBuild\Current\Bin\MSBuild.exe'
-
-          & $msbuild "$apollo\Apollo.sln" /m /p:Configuration=Release /p:Platform=x64
-          if ($LASTEXITCODE -ne 0) { throw "Apollo x64 build failed with exit code $LASTEXITCODE" }
-
-          $apollo64 = Join-Path $apollo 'x64\Release\Apollo.dll'
-          if (-not (Test-Path $apollo64)) { throw "Apollo x64 DLL not found at $apollo64" }
-
-          Copy-Item -Force $apollo64 "$env:GITHUB_WORKSPACE\extensions\Apollo\Apollo.dll"
-          Copy-Item -Force $apollo64 "$env:GITHUB_WORKSPACE\extensions\Apollo\Apollo_x64.dll"
+          $apolloHash = (Get-FileHash (Join-Path $currentApollo 'Apollo_x64.dll') -Algorithm SHA256).Hash
+          "APOLLO_X64_SHA256=$apolloHash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Using legacy Apollo x64 SHA256: $apolloHash"
 
       - name: Setup GameMaker / Igor
         id: igor
@@ -128,14 +131,34 @@ jobs:
             throw 'The Windows data.win still references libmacWindowManager.dylib.'
           }
 
+          $packagedApollo = Join-Path $appRoot 'Apollo_x64.dll'
+          if (-not (Test-Path $packagedApollo)) {
+            throw 'Apollo_x64.dll was not included in the Windows package.'
+          }
+          $packagedApolloHash = (Get-FileHash $packagedApollo -Algorithm SHA256).Hash
+          if ($packagedApolloHash -ne $env:APOLLO_X64_SHA256) {
+            throw "Packaged Apollo_x64.dll does not match the known-compatible source payload. Expected $env:APOLLO_X64_SHA256, got $packagedApolloHash"
+          }
+
       - name: Smoke test Windows build
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $process = Start-Process -FilePath "$env:APP_ROOT\PixelComposer.exe" -WorkingDirectory $env:APP_ROOT -PassThru
+          $stdout = Join-Path $env:RUNNER_TEMP 'pixelcomposer-stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'pixelcomposer-stderr.log'
+          $process = Start-Process -FilePath "$env:APP_ROOT\PixelComposer.exe" -WorkingDirectory $env:APP_ROOT -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
           Start-Sleep -Seconds 10
+
+          $output = ''
+          if (Test-Path $stdout) { $output += Get-Content -Raw $stdout }
+          if (Test-Path $stderr) { $output += "`n" + (Get-Content -Raw $stderr) }
+          if ($output -match 'Unable to find function') {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+            throw "Pixel Composer reported a missing function during startup:`n$output"
+          }
+
           if ($process.HasExited) {
-            throw "PixelComposer.exe exited during the startup smoke test with code $($process.ExitCode)."
+            throw "PixelComposer.exe exited during the startup smoke test with code $($process.ExitCode).`n$output"
           }
           Stop-Process -Id $process.Id -Force
 
