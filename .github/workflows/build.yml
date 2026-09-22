@@ -3,8 +3,7 @@ name: Build Pixel Composer
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
 
 jobs:
   build-windows:
@@ -31,43 +30,29 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $apolloDir = Join-Path $env:GITHUB_WORKSPACE 'extensions\Apollo'
           $apolloYy = Join-Path $apolloDir 'Apollo.yy'
-
-          # Apollo.yy is GameMaker JSON with trailing commas. Validate every
-          # extension source filename and every proxy library it declares.
           $yyText = Get-Content -Raw $apolloYy
+
           $declaredFiles = [regex]::Matches($yyText, '"filename"\s*:\s*"([^"]+)"') |
-            ForEach-Object { $_.Groups[1].Value } |
-            Where-Object { $_ } |
-            Sort-Object -Unique
+            ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ } | Sort-Object -Unique
           $proxyFiles = [regex]::Matches($yyText, '"\%Name"\s*:\s*"(Apollo(?:_x64)?\.(?:dll|so|dylib))"') |
-            ForEach-Object { $_.Groups[1].Value } |
-            Where-Object { $_ } |
-            Sort-Object -Unique
+            ForEach-Object { $_.Groups[1].Value } | Where-Object { $_ } | Sort-Object -Unique
 
           foreach ($file in @($declaredFiles) + @($proxyFiles)) {
-            $path = Join-Path $apolloDir $file
-            if (-not (Test-Path $path)) {
+            if (-not (Test-Path (Join-Path $apolloDir $file))) {
               throw "Apollo.yy references missing extension file: $file"
             }
           }
 
-          foreach ($file in @(
-            'Apollo.dll',
-            'Apollo_x64.dll',
-            'apollo_buffer.gml',
-            'apollo_call.gml',
-            'apollo_core.gml',
-            'apollo_ref.gml',
-            'apollo_script_execute.gml'
-          )) {
+          foreach ($file in @('Apollo.dll', 'Apollo_x64.dll', 'apollo_buffer.gml', 'apollo_call.gml', 'apollo_core.gml', 'apollo_ref.gml', 'apollo_script_execute.gml')) {
             if (-not (Test-Path (Join-Path $apolloDir $file))) {
               throw "Required Apollo compatibility file is missing: $file"
             }
           }
 
+          # This Apollo release predates modern GML function declarations.
           $callSource = Get-Content -Raw (Join-Path $apolloDir 'apollo_call.gml')
-          if ($callSource -notmatch 'function\s+lua_call\s*\(') {
-            throw 'apollo_call.gml does not define lua_call.'
+          if ($callSource -notmatch '(?m)^\s*#define\s+lua_call\s*$') {
+            throw 'apollo_call.gml does not define the legacy lua_call script.'
           }
 
           $patreonFile = Join-Path $env:GITHUB_WORKSPACE 'extensions\patreon_key\patreon_key.gml'
@@ -119,25 +104,21 @@ jobs:
 
           $macLibraries = @(Get-ChildItem -Path $appRoot -Recurse -File -Include '*.dylib')
           if ($macLibraries.Count -gt 0) {
-            $names = ($macLibraries | ForEach-Object FullName) -join "`n"
-            throw "macOS libraries were included in the Windows package:`n$names"
+            throw "macOS libraries were included in the Windows package: $($macLibraries.FullName -join ', ')"
           }
 
           $dataWin = Join-Path $appRoot 'data.win'
           if (-not (Test-Path $dataWin)) { throw 'data.win was not found in the GameMaker package.' }
-          $bytes = [System.IO.File]::ReadAllBytes($dataWin)
-          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+          $ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($dataWin))
           if ($ascii.Contains('libmacWindowManager.dylib')) {
             throw 'The Windows data.win still references libmacWindowManager.dylib.'
           }
 
           $packagedApollo = Join-Path $appRoot 'Apollo_x64.dll'
-          if (-not (Test-Path $packagedApollo)) {
-            throw 'Apollo_x64.dll was not included in the Windows package.'
-          }
+          if (-not (Test-Path $packagedApollo)) { throw 'Apollo_x64.dll was not included in the Windows package.' }
           $packagedApolloHash = (Get-FileHash $packagedApollo -Algorithm SHA256).Hash
           if ($packagedApolloHash -ne $env:APOLLO_X64_SHA256) {
-            throw "Packaged Apollo_x64.dll differs from the committed compatibility runtime. Expected $env:APOLLO_X64_SHA256, got $packagedApolloHash"
+            throw "Packaged Apollo_x64.dll differs from the committed runtime. Expected $env:APOLLO_X64_SHA256, got $packagedApolloHash"
           }
 
       - name: Smoke test portable Windows build
@@ -168,12 +149,10 @@ jobs:
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
             throw "Pixel Composer reported a startup error:`n$output"
           }
-          if ($process.HasExited) {
-            throw "PixelComposer.exe exited during portable startup with code $($process.ExitCode).`n$output"
-          }
+          if ($process.HasExited) { throw "PixelComposer.exe exited during portable startup with code $($process.ExitCode).`n$output" }
           if (-not $hasWindow) {
             Stop-Process -Id $process.Id -Force
-            throw "PixelComposer.exe stayed alive but did not create a top-level window within the startup test.`n$output"
+            throw "PixelComposer.exe stayed alive but did not create a top-level window.`n$output"
           }
           Stop-Process -Id $process.Id -Force
 
@@ -182,10 +161,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           choco install innosetup -y --no-progress
-
           $installerDir = Join-Path $env:GITHUB_WORKSPACE 'installer'
           New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
-
           $issPath = Join-Path $env:RUNNER_TEMP 'PixelComposer.iss'
           @"
           [Setup]
@@ -235,20 +212,11 @@ jobs:
           $installRoot = Join-Path $env:RUNNER_TEMP 'pixelcomposer-installed'
           if (Test-Path $installRoot) { Remove-Item -Recurse -Force $installRoot }
 
-          $install = Start-Process -FilePath $env:INSTALLER_PATH -ArgumentList @(
-            '/VERYSILENT',
-            '/SUPPRESSMSGBOXES',
-            '/NORESTART',
-            "/DIR=$installRoot"
-          ) -Wait -PassThru
-          if ($install.ExitCode -ne 0) {
-            throw "Pixel Composer installer exited with code $($install.ExitCode)."
-          }
+          $install = Start-Process -FilePath $env:INSTALLER_PATH -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$installRoot") -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Pixel Composer installer exited with code $($install.ExitCode)." }
 
           $installedExe = Join-Path $installRoot 'PixelComposer.exe'
-          if (-not (Test-Path $installedExe)) {
-            throw "Installer completed but PixelComposer.exe was not installed at $installedExe"
-          }
+          if (-not (Test-Path $installedExe)) { throw "Installer completed but PixelComposer.exe was not installed at $installedExe" }
 
           $stdout = Join-Path $env:RUNNER_TEMP 'pixelcomposer-installed-stdout.log'
           $stderr = Join-Path $env:RUNNER_TEMP 'pixelcomposer-installed-stderr.log'
@@ -274,14 +242,11 @@ jobs:
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
             throw "Installed Pixel Composer reported a startup error:`n$output"
           }
-          if ($process.HasExited) {
-            throw "Installed PixelComposer.exe exited during startup with code $($process.ExitCode).`n$output"
-          }
+          if ($process.HasExited) { throw "Installed PixelComposer.exe exited during startup with code $($process.ExitCode).`n$output" }
           if (-not $hasWindow) {
             Stop-Process -Id $process.Id -Force
             throw "Installed PixelComposer.exe stayed alive but did not create a top-level window.`n$output"
           }
-
           Stop-Process -Id $process.Id -Force
           Write-Host 'Installed Pixel Composer launched successfully and created a visible top-level window.'
 
