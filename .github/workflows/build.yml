@@ -49,7 +49,6 @@ jobs:
             }
           }
 
-          # This Apollo release predates modern GML function declarations.
           $callSource = Get-Content -Raw (Join-Path $apolloDir 'apollo_call.gml')
           if ($callSource -notmatch '(?m)^\s*#define\s+lua_call\s*$') {
             throw 'apollo_call.gml does not define the legacy lua_call script.'
@@ -57,10 +56,10 @@ jobs:
 
           $patreonFile = Join-Path $env:GITHUB_WORKSPACE 'extensions\patreon_key\patreon_key.gml'
           $privateKeysFile = Join-Path $env:GITHUB_WORKSPACE 'extensions\PRIVATE_KEYS\PRIVATE_KEYS.gml'
-          if (-not (Test-Path $patreonFile) -or (Get-Content -Raw $patreonFile) -notmatch 'function\s+patreon_init_keys\s*\(') {
+          if (-not (Test-Path $patreonFile) -or (Get-Content -Raw $patreonFile) -notmatch '(?m)^\s*#define\s+patreon_init_keys\s*$') {
             throw 'Public Patreon extension stub is missing or invalid.'
           }
-          if (-not (Test-Path $privateKeysFile) -or (Get-Content -Raw $privateKeysFile) -notmatch 'function\s+__init_private_keys\s*\(') {
+          if (-not (Test-Path $privateKeysFile) -or (Get-Content -Raw $privateKeysFile) -notmatch '(?m)^\s*#define\s+__init_private_keys\s*$') {
             throw 'Public private-key extension stub is missing or invalid.'
           }
 
@@ -121,40 +120,13 @@ jobs:
             throw "Packaged Apollo_x64.dll differs from the committed runtime. Expected $env:APOLLO_X64_SHA256, got $packagedApolloHash"
           }
 
-      - name: Smoke test portable Windows build
+      - name: Launch-test portable Windows build
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $stdout = Join-Path $env:RUNNER_TEMP 'pixelcomposer-portable-stdout.log'
-          $stderr = Join-Path $env:RUNNER_TEMP 'pixelcomposer-portable-stderr.log'
-          $process = Start-Process -FilePath "$env:APP_ROOT\PixelComposer.exe" -WorkingDirectory $env:APP_ROOT -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-          $deadline = (Get-Date).AddSeconds(30)
-          $hasWindow = $false
-
-          while ((Get-Date) -lt $deadline) {
-            Start-Sleep -Seconds 1
-            $process.Refresh()
-            if ($process.HasExited) { break }
-            if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
-              $hasWindow = $true
-              Write-Host "Pixel Composer portable window detected: '$($process.MainWindowTitle)'"
-              break
-            }
-          }
-
-          $output = ''
-          if (Test-Path $stdout) { $output += Get-Content -Raw $stdout }
-          if (Test-Path $stderr) { $output += "`n" + (Get-Content -Raw $stderr) }
-          if ($output -match 'Unable to find function|Could not locate initialization function|ERROR in action number|Fatal Error') {
-            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-            throw "Pixel Composer reported a startup error:`n$output"
-          }
-          if ($process.HasExited) { throw "PixelComposer.exe exited during portable startup with code $($process.ExitCode).`n$output" }
-          if (-not $hasWindow) {
-            Stop-Process -Id $process.Id -Force
-            throw "PixelComposer.exe stayed alive but did not create a top-level window.`n$output"
-          }
-          Stop-Process -Id $process.Id -Force
+          & "$env:GITHUB_WORKSPACE\scripts\ci\Test-PixelComposerLaunch.ps1" `
+            -ExePath "$env:APP_ROOT\PixelComposer.exe" `
+            -WorkingDirectory $env:APP_ROOT `
+            -Label 'Portable Pixel Composer'
 
       - name: Build Windows installer
         shell: pwsh
@@ -205,7 +177,7 @@ jobs:
           if (-not (Test-Path $installer)) { throw 'PixelComposer-Setup.exe was not produced.' }
           "INSTALLER_PATH=$installer" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Install and launch Windows installer artifact
+      - name: Install and launch-test Windows installer artifact
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -218,37 +190,10 @@ jobs:
           $installedExe = Join-Path $installRoot 'PixelComposer.exe'
           if (-not (Test-Path $installedExe)) { throw "Installer completed but PixelComposer.exe was not installed at $installedExe" }
 
-          $stdout = Join-Path $env:RUNNER_TEMP 'pixelcomposer-installed-stdout.log'
-          $stderr = Join-Path $env:RUNNER_TEMP 'pixelcomposer-installed-stderr.log'
-          $process = Start-Process -FilePath $installedExe -WorkingDirectory $installRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-          $deadline = (Get-Date).AddSeconds(30)
-          $hasWindow = $false
-
-          while ((Get-Date) -lt $deadline) {
-            Start-Sleep -Seconds 1
-            $process.Refresh()
-            if ($process.HasExited) { break }
-            if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
-              $hasWindow = $true
-              Write-Host "Installed Pixel Composer window detected: '$($process.MainWindowTitle)'"
-              break
-            }
-          }
-
-          $output = ''
-          if (Test-Path $stdout) { $output += Get-Content -Raw $stdout }
-          if (Test-Path $stderr) { $output += "`n" + (Get-Content -Raw $stderr) }
-          if ($output -match 'Unable to find function|Could not locate initialization function|ERROR in action number|Fatal Error') {
-            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-            throw "Installed Pixel Composer reported a startup error:`n$output"
-          }
-          if ($process.HasExited) { throw "Installed PixelComposer.exe exited during startup with code $($process.ExitCode).`n$output" }
-          if (-not $hasWindow) {
-            Stop-Process -Id $process.Id -Force
-            throw "Installed PixelComposer.exe stayed alive but did not create a top-level window.`n$output"
-          }
-          Stop-Process -Id $process.Id -Force
-          Write-Host 'Installed Pixel Composer launched successfully and created a visible top-level window.'
+          & "$env:GITHUB_WORKSPACE\scripts\ci\Test-PixelComposerLaunch.ps1" `
+            -ExePath $installedExe `
+            -WorkingDirectory $installRoot `
+            -Label 'Installed Pixel Composer'
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
