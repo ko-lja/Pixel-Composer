@@ -25,97 +25,63 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\prefabs" | Out-Null
           Copy-Item -Recurse -Force "$env:RUNNER_TEMP\chaptermaster\prefabs\io.gamemaker.sdfshaders-1.0.0" "$env:GITHUB_WORKSPACE\prefabs\io.gamemaker.sdfshaders-1.0.0"
 
-      - name: Restore compatible Apollo extension
+      - name: Validate committed runtime files
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $apolloDir = Join-Path $env:GITHUB_WORKSPACE 'extensions\Apollo'
+          $apolloYy = Join-Path $apolloDir 'Apollo.yy'
 
-          # Pixel Composer's Apollo.yy still describes the legacy Apollo API and
-          # GML helper files. Building current YAL-GameMaker/Apollo produces a
-          # different API and leaves the helper .gml files missing, which makes
-          # the packaged app fail at runtime (for example: lua_call not found).
-          # Restore the exact extension payload that Pixel Composer historically
-          # shipped alongside this API, while keeping the current Apollo.yy.
-          $apolloCommit = 'f02c1fd2179e134b543aeff25053de486b2e0485'
-          $legacy = Join-Path $env:RUNNER_TEMP 'pixel-composer-legacy'
-          $legacyApollo = Join-Path $legacy 'extensions\Apollo'
-          $currentApollo = Join-Path $env:GITHUB_WORKSPACE 'extensions\Apollo'
-          $currentYy = Join-Path $currentApollo 'Apollo.yy'
-          $savedYy = Join-Path $env:RUNNER_TEMP 'Apollo.yy'
-
-          Copy-Item -Force $currentYy $savedYy
-
-          git init $legacy
-          git -C $legacy remote add origin https://github.com/Ttanasart-pt/Pixel-Composer.git
-          git -C $legacy fetch --depth 1 origin $apolloCommit
-          git -C $legacy checkout FETCH_HEAD -- extensions/Apollo
-
-          if (-not (Test-Path $legacyApollo)) {
-            throw "Legacy Apollo payload was not found at commit $apolloCommit."
-          }
-
-          Copy-Item -Recurse -Force "$legacyApollo\*" $currentApollo
-          Copy-Item -Force $savedYy $currentYy
-
-          # Apollo.yy is GameMaker JSON with trailing commas, so use its filename
-          # declarations instead of trying to parse it as strict JSON.
-          $yyText = Get-Content -Raw $currentYy
+          # Apollo.yy is GameMaker JSON with trailing commas. Validate every
+          # extension source filename and every proxy library it declares.
+          $yyText = Get-Content -Raw $apolloYy
           $declaredFiles = [regex]::Matches($yyText, '"filename"\s*:\s*"([^"]+)"') |
             ForEach-Object { $_.Groups[1].Value } |
             Where-Object { $_ } |
             Sort-Object -Unique
+          $proxyFiles = [regex]::Matches($yyText, '"\%Name"\s*:\s*"(Apollo(?:_x64)?\.(?:dll|so|dylib))"') |
+            ForEach-Object { $_.Groups[1].Value } |
+            Where-Object { $_ } |
+            Sort-Object -Unique
 
-          foreach ($file in $declaredFiles) {
-            $path = Join-Path $currentApollo $file
+          foreach ($file in @($declaredFiles) + @($proxyFiles)) {
+            $path = Join-Path $apolloDir $file
             if (-not (Test-Path $path)) {
               throw "Apollo.yy references missing extension file: $file"
             }
           }
 
-          foreach ($file in @('Apollo.dll', 'Apollo_x64.dll', 'apollo_call.gml', 'apollo_core.gml')) {
-            $path = Join-Path $currentApollo $file
-            if (-not (Test-Path $path)) {
+          foreach ($file in @(
+            'Apollo.dll',
+            'Apollo_x64.dll',
+            'apollo_buffer.gml',
+            'apollo_call.gml',
+            'apollo_core.gml',
+            'apollo_ref.gml',
+            'apollo_script_execute.gml'
+          )) {
+            if (-not (Test-Path (Join-Path $apolloDir $file))) {
               throw "Required Apollo compatibility file is missing: $file"
             }
           }
 
-          $apolloHash = (Get-FileHash (Join-Path $currentApollo 'Apollo_x64.dll') -Algorithm SHA256).Hash
-          "APOLLO_X64_SHA256=$apolloHash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "Using legacy Apollo x64 SHA256: $apolloHash"
+          $callSource = Get-Content -Raw (Join-Path $apolloDir 'apollo_call.gml')
+          if ($callSource -notmatch 'function\s+lua_call\s*\(') {
+            throw 'apollo_call.gml does not define lua_call.'
+          }
 
-      - name: Provide local-only extension key stubs
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          # These two files are deliberately excluded by extensions/.gitignore
-          # because upstream keeps deployment credentials in them. The public
-          # project still registers their init hooks, though, so a clean clone
-          # otherwise builds an executable that fails immediately at startup.
-          #
-          # For public/CI builds, provide non-secret fallbacks. Patreon-backed
-          # online verification is unavailable without the owner's real keys,
-          # but the editor itself can start and run.
           $patreonFile = Join-Path $env:GITHUB_WORKSPACE 'extensions\patreon_key\patreon_key.gml'
-          @'
-          function patreon_init_keys() {
-              global.PATREON_ACTIVATION_KEYS = "";
-              global.PATREON_EMAIL_TOKENS = "";
-          }
-          '@ | Set-Content -Encoding utf8 $patreonFile
-
           $privateKeysFile = Join-Path $env:GITHUB_WORKSPACE 'extensions\PRIVATE_KEYS\PRIVATE_KEYS.gml'
-          @'
-          function __init_private_keys() {
-              // Intentionally empty for public builds.
+          if (-not (Test-Path $patreonFile) -or (Get-Content -Raw $patreonFile) -notmatch 'function\s+patreon_init_keys\s*\(') {
+            throw 'Public Patreon extension stub is missing or invalid.'
           }
-          '@ | Set-Content -Encoding utf8 $privateKeysFile
+          if (-not (Test-Path $privateKeysFile) -or (Get-Content -Raw $privateKeysFile) -notmatch 'function\s+__init_private_keys\s*\(') {
+            throw 'Public private-key extension stub is missing or invalid.'
+          }
 
-          foreach ($file in @($patreonFile, $privateKeysFile)) {
-            if (-not (Test-Path $file)) {
-              throw "Required public-build extension stub was not created: $file"
-            }
-          }
+          $apolloHash = (Get-FileHash (Join-Path $apolloDir 'Apollo_x64.dll') -Algorithm SHA256).Hash
+          "APOLLO_X64_SHA256=$apolloHash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Committed Apollo x64 SHA256: $apolloHash"
 
       - name: Setup GameMaker / Igor
         id: igor
@@ -171,28 +137,43 @@ jobs:
           }
           $packagedApolloHash = (Get-FileHash $packagedApollo -Algorithm SHA256).Hash
           if ($packagedApolloHash -ne $env:APOLLO_X64_SHA256) {
-            throw "Packaged Apollo_x64.dll does not match the known-compatible source payload. Expected $env:APOLLO_X64_SHA256, got $packagedApolloHash"
+            throw "Packaged Apollo_x64.dll differs from the committed compatibility runtime. Expected $env:APOLLO_X64_SHA256, got $packagedApolloHash"
           }
 
-      - name: Smoke test Windows build
+      - name: Smoke test portable Windows build
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $stdout = Join-Path $env:RUNNER_TEMP 'pixelcomposer-stdout.log'
-          $stderr = Join-Path $env:RUNNER_TEMP 'pixelcomposer-stderr.log'
+          $stdout = Join-Path $env:RUNNER_TEMP 'pixelcomposer-portable-stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'pixelcomposer-portable-stderr.log'
           $process = Start-Process -FilePath "$env:APP_ROOT\PixelComposer.exe" -WorkingDirectory $env:APP_ROOT -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-          Start-Sleep -Seconds 10
+          $deadline = (Get-Date).AddSeconds(30)
+          $hasWindow = $false
+
+          while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 1
+            $process.Refresh()
+            if ($process.HasExited) { break }
+            if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
+              $hasWindow = $true
+              Write-Host "Pixel Composer portable window detected: '$($process.MainWindowTitle)'"
+              break
+            }
+          }
 
           $output = ''
           if (Test-Path $stdout) { $output += Get-Content -Raw $stdout }
           if (Test-Path $stderr) { $output += "`n" + (Get-Content -Raw $stderr) }
-          if ($output -match 'Unable to find function|Could not locate initialization function') {
+          if ($output -match 'Unable to find function|Could not locate initialization function|ERROR in action number|Fatal Error') {
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-            throw "Pixel Composer reported a missing extension function during startup:`n$output"
+            throw "Pixel Composer reported a startup error:`n$output"
           }
-
           if ($process.HasExited) {
-            throw "PixelComposer.exe exited during the startup smoke test with code $($process.ExitCode).`n$output"
+            throw "PixelComposer.exe exited during portable startup with code $($process.ExitCode).`n$output"
+          }
+          if (-not $hasWindow) {
+            Stop-Process -Id $process.Id -Force
+            throw "PixelComposer.exe stayed alive but did not create a top-level window within the startup test.`n$output"
           }
           Stop-Process -Id $process.Id -Force
 
@@ -245,6 +226,64 @@ jobs:
 
           $installer = Join-Path $installerDir 'PixelComposer-Setup.exe'
           if (-not (Test-Path $installer)) { throw 'PixelComposer-Setup.exe was not produced.' }
+          "INSTALLER_PATH=$installer" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install and launch Windows installer artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installRoot = Join-Path $env:RUNNER_TEMP 'pixelcomposer-installed'
+          if (Test-Path $installRoot) { Remove-Item -Recurse -Force $installRoot }
+
+          $install = Start-Process -FilePath $env:INSTALLER_PATH -ArgumentList @(
+            '/VERYSILENT',
+            '/SUPPRESSMSGBOXES',
+            '/NORESTART',
+            "/DIR=$installRoot"
+          ) -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            throw "Pixel Composer installer exited with code $($install.ExitCode)."
+          }
+
+          $installedExe = Join-Path $installRoot 'PixelComposer.exe'
+          if (-not (Test-Path $installedExe)) {
+            throw "Installer completed but PixelComposer.exe was not installed at $installedExe"
+          }
+
+          $stdout = Join-Path $env:RUNNER_TEMP 'pixelcomposer-installed-stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'pixelcomposer-installed-stderr.log'
+          $process = Start-Process -FilePath $installedExe -WorkingDirectory $installRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+          $deadline = (Get-Date).AddSeconds(30)
+          $hasWindow = $false
+
+          while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 1
+            $process.Refresh()
+            if ($process.HasExited) { break }
+            if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
+              $hasWindow = $true
+              Write-Host "Installed Pixel Composer window detected: '$($process.MainWindowTitle)'"
+              break
+            }
+          }
+
+          $output = ''
+          if (Test-Path $stdout) { $output += Get-Content -Raw $stdout }
+          if (Test-Path $stderr) { $output += "`n" + (Get-Content -Raw $stderr) }
+          if ($output -match 'Unable to find function|Could not locate initialization function|ERROR in action number|Fatal Error') {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+            throw "Installed Pixel Composer reported a startup error:`n$output"
+          }
+          if ($process.HasExited) {
+            throw "Installed PixelComposer.exe exited during startup with code $($process.ExitCode).`n$output"
+          }
+          if (-not $hasWindow) {
+            Stop-Process -Id $process.Id -Force
+            throw "Installed PixelComposer.exe stayed alive but did not create a top-level window.`n$output"
+          }
+
+          Stop-Process -Id $process.Id -Force
+          Write-Host 'Installed Pixel Composer launched successfully and created a visible top-level window.'
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
