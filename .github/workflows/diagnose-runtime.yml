@@ -1,0 +1,139 @@
+name: Diagnose Pixel Composer runtime
+
+on:
+  push:
+    branches:
+      - runtime-diagnostics
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  diagnose-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout diagnostics branch
+        uses: actions/checkout@v4
+
+      - name: Download run 17 portable artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\artifact" | Out-Null
+          gh run download 35723802078 --repo ko-lja/Pixel-Composer --name PixelComposer-Windows-Portable --dir "$env:RUNNER_TEMP\artifact"
+          Get-ChildItem -Recurse "$env:RUNNER_TEMP\artifact" | ForEach-Object { Write-Host $_.FullName }
+
+      - name: Extract portable build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Get-ChildItem -Path "$env:RUNNER_TEMP\artifact" -Recurse -Filter 'PixelComposer.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'PixelComposer.zip not found in downloaded artifact.' }
+          $packageDir = Join-Path $env:RUNNER_TEMP 'pixelcomposer-package'
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          Expand-Archive -Force $zip.FullName $packageDir
+          $exe = Get-ChildItem -Path $packageDir -Recurse -Filter 'PixelComposer.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'PixelComposer.exe not found in portable package.' }
+          "PXC_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PXC_DIR=$($exe.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Launch and capture startup dialog
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Add-Type @'
+          using System;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+          using System.Text;
+
+          public static class WindowInspector {
+              public delegate bool EnumWindowProc(IntPtr hWnd, IntPtr lParam);
+
+              [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+              static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+              [DllImport("user32.dll")]
+              static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowProc lpEnumFunc, IntPtr lParam);
+
+              static string ReadText(IntPtr handle) {
+                  var text = new StringBuilder(32768);
+                  GetWindowText(handle, text, text.Capacity);
+                  return text.ToString();
+              }
+
+              public static string Dump(IntPtr root) {
+                  var lines = new List<string>();
+                  var rootText = ReadText(root);
+                  if (!String.IsNullOrWhiteSpace(rootText)) lines.Add("ROOT: " + rootText);
+                  EnumChildWindows(root, (hWnd, lParam) => {
+                      var text = ReadText(hWnd);
+                      if (!String.IsNullOrWhiteSpace(text)) lines.Add("CHILD: " + text);
+                      return true;
+                  }, IntPtr.Zero);
+                  return String.Join(Environment.NewLine, lines);
+              }
+          }
+          '@
+
+          Add-Type -AssemblyName UIAutomationClient
+
+          $stdout = Join-Path $env:RUNNER_TEMP 'pxc-stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'pxc-stderr.log'
+          $process = Start-Process -FilePath $env:PXC_EXE -WorkingDirectory $env:PXC_DIR -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+
+          $deadline = (Get-Date).AddSeconds(30)
+          $window = $null
+          while ((Get-Date) -lt $deadline) {
+              if ($process.HasExited) { break }
+              $process.Refresh()
+              if ($process.MainWindowHandle -ne 0) {
+                  $window = $process.MainWindowHandle
+                  break
+              }
+              Start-Sleep -Milliseconds 250
+          }
+
+          Write-Host "Process exited: $($process.HasExited)"
+          if ($process.HasExited) { Write-Host "Exit code: $($process.ExitCode)" }
+          if (Test-Path $stdout) { Write-Host "--- STDOUT ---"; Get-Content $stdout }
+          if (Test-Path $stderr) { Write-Host "--- STDERR ---"; Get-Content $stderr }
+
+          if ($window) {
+              $process.Refresh()
+              Write-Host "--- WINDOW TITLE ---"
+              Write-Host $process.MainWindowTitle
+              Write-Host "--- USER32 WINDOW TEXT ---"
+              Write-Host ([WindowInspector]::Dump($window))
+
+              Write-Host "--- UI AUTOMATION TEXT ---"
+              try {
+                  $root = [System.Windows.Automation.AutomationElement]::FromHandle($window)
+                  if ($root) {
+                      Write-Host "ROOT NAME: $($root.Current.Name)"
+                      $all = $root.FindAll(
+                          [System.Windows.Automation.TreeScope]::Descendants,
+                          [System.Windows.Automation.Condition]::TrueCondition
+                      )
+                      for ($i = 0; $i -lt $all.Count; $i++) {
+                          $el = $all.Item($i)
+                          $name = $el.Current.Name
+                          if (-not [string]::IsNullOrWhiteSpace($name)) {
+                              Write-Host "UIA: $name"
+                          }
+                      }
+                  }
+              } catch {
+                  Write-Host "UI Automation inspection failed: $($_.Exception.Message)"
+              }
+          } else {
+              Write-Host 'No top-level window appeared.'
+          }
+
+          if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          throw 'Diagnostic intentionally fails after capturing Pixel Composer startup state.'
