@@ -1,8 +1,16 @@
-.vs
-docs
-patreon_key/patreon_key.gml
-PRIVATE_KEYS/PRIVATE_KEYS.gml
-*.cpp
+# Ignore everything in this directory
+*
 
-Apollo
-!Apollo/Apollo.yy
+# Except this file
+!.gitignore
+
+# and the *.yy files
+!**/*.yy
+
+# Runtime files required by a clean public checkout.
+!Apollo/
+!Apollo/**
+!patreon_key/
+!patreon_key/patreon_key.gml
+!PRIVATE_KEYS/
+!PRIVATE_KEYS/PRIVATE_KEYS.gml
